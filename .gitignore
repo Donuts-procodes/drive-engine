@@ -1,0 +1,43 @@
+# Environments
+venv/
+env/
+.env
+audit_venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Local Vector Database
+local_chroma_db/
+
+# Frontend
+node_modules/
+dist/
+build/
+.npm/
+.eslintcache
+
+# IDEs & System Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.gemini/
+.antigravity/
+
+# Generated Test Reports & Zips
+*_stress_report.txt
+*.zip
+gdrive_engine_export/
+test_export/
+tests/reports/
+
+# Docker
+.dockerignore
