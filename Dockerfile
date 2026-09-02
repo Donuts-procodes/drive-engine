@@ -27,8 +27,9 @@ COPY requirements.txt /app/
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install python dependencies using uv
+RUN pip install --no-cache-dir uv && \
+    uv pip install -r requirements.txt
 
 # Pre-download Hugging Face Sentence-Transformer model into the image cache
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"

@@ -16,6 +16,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing import Optional, Dict, Any
 import hashlib
 import os
+import re
 
 from .vectorstore import get_vector_store
 from .llm import get_rag_engine
@@ -47,7 +48,9 @@ async def ingest_texts_async(texts: list, namespace: str, source: str, name: str
         for k, v in tika_metadata.items():
             # ChromaDB only accepts string, integer, float or boolean values in metadata.
             # Convert everything else to string.
-            safe_key = f"tika_{k}"
+            # Milvus strictly requires field names to contain ONLY alphanumeric characters and underscores.
+            sanitized_k = re.sub(r'[^a-zA-Z0-9_]', '_', str(k))
+            safe_key = f"tika_{sanitized_k}"
             if isinstance(v, (str, int, float, bool)):
                 base_meta[safe_key] = v
             elif isinstance(v, list):
@@ -90,7 +93,7 @@ def query_master_database(query_text: str, n_results: int = 4, namespaces: list 
     
     **Why**: This is what gives the AI its "memory" of your specific documents.
     """
-    vector_store = get_vector_store(force_reload=True)
+    vector_store = get_vector_store()
     results = vector_store.query_similar(query_text, n_results=n_results, namespaces=namespaces)
     
     # Concatenate the text chunks to construct a comprehensive context block.
@@ -111,7 +114,7 @@ def list_namespaces() -> list:
     
     **Why**: Used by the React Frontend to populate the "Database Manager" UI panel.
     """
-    vector_store = get_vector_store(force_reload=True)
+    vector_store = get_vector_store()
     return vector_store.list_namespaces()
 
 def purge_namespace(namespace: str) -> bool:

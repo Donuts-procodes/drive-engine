@@ -15,3 +15,5 @@ tenacity
 confluent-kafka
 sentence-transformers
 langchain-huggingface
+pymilvus
+langchain-milvus

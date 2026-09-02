@@ -11,7 +11,7 @@ This module controls:
 6. DB Maintenance: Clear namespaces and physically reclaim storage space.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 import json
 from pydantic import BaseModel, Field
@@ -26,6 +26,7 @@ from confluent_kafka import Producer
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 from engine.connectors import get_connector_for_url
+from api.security import require_api_key
 from engine.rag_core import (
     ingest_texts_async, 
     query_master_database, 
@@ -36,7 +37,12 @@ from engine.rag_core import (
     file_exists_in_db
 )
 
-router = APIRouter()
+from api.auth import router as auth_router
+from api.browser import router as browser_router
+
+router = APIRouter(dependencies=[Depends(require_api_key)])
+router.include_router(auth_router, prefix="/auth")
+router.include_router(browser_router)
 
 # =====================================================================
 # PYDANTIC SCHEMAS (Request/Response Models)
@@ -51,6 +57,16 @@ class EnqueueRequest(BaseModel):
     """Schema for queueing a file/folder for background processing."""
     link: str = Field(..., description="The raw Google Drive/Dropbox share URL.")
     access_token: Optional[str] = Field(None, description="Optional OAuth2 credentials token.")
+
+class PickerItem(BaseModel):
+    id: str
+    type: str
+
+class EnqueueItemsRequest(BaseModel):
+    """Schema for queueing selected items from the native File Picker."""
+    provider: str = Field(..., description="The cloud provider (e.g. google, dropbox)")
+    items: List[PickerItem] = Field(..., description="List of native file or folder objects to ingest.")
+    access_token: Optional[str] = Field(None, description="OAuth2 credentials token.")
 
 class QueryRequest(BaseModel):
     """Schema for querying the vector search RAG bot."""
@@ -162,6 +178,42 @@ def enqueue_link_endpoint(request: EnqueueRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/enqueue_items")
+def enqueue_items_endpoint(request: EnqueueItemsRequest):
+    """
+    Pushes native file IDs to the Kafka background worker by constructing URLs.
+    """
+    try:
+        producer = get_producer()
+        topic = os.getenv("KAFKA_VECTORIZE_TOPIC", "vectorize-tasks")
+        count = 0
+        
+        for item in request.items:
+            # Construct standard URLs to maintain compatibility with the existing worker logic
+            if request.provider == "google":
+                if item.type == "folder":
+                    link = f"https://drive.google.com/drive/folders/{item.id}"
+                else:
+                    link = f"https://drive.google.com/file/d/{item.id}/view"
+            elif request.provider == "dropbox":
+                link = f"https://www.dropbox.com/s/{item.id}" # Mock URL, worker handles this natively later
+            else:
+                link = item.id # Fallback
+                
+            payload = json.dumps({
+                "link": link,
+                "access_token": request.access_token
+            }).encode('utf-8')
+            producer.produce(topic, payload)
+            count += 1
+            
+        producer.flush()
+        return {"status": "success", "message": f"Queued {count} items for background ingestion."}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/namespaces")
 def get_namespaces_endpoint():
     """
@@ -173,6 +225,29 @@ def get_namespaces_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/stream_progress")
+async def stream_progress():
+    """
+    Server-Sent Events (SSE) endpoint to stream real-time background worker progress to the frontend.
+    """
+    async def event_generator():
+        log_file_path = "/app/local_chroma_db/worker_progress.log"
+        # Ensure file exists
+        if not os.path.exists(log_file_path):
+            open(log_file_path, "w").close()
+            
+        with open(log_file_path, "r") as f:
+            # Seek to end so we only get new progress for this active session
+            f.seek(0, os.SEEK_END)
+            while True:
+                line = f.readline()
+                if not line:
+                    await asyncio.sleep(0.2)
+                    continue
+                if "[Progress]" in line:
+                    yield f"data: {line}\n\n"
+                    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.post("/query")

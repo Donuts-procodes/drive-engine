@@ -41,3 +41,6 @@ tests/reports/
 
 # Docker
 .dockerignore
+
+# Secrets
+client_secret_*.json

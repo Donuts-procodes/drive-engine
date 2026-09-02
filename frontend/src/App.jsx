@@ -1,9 +1,78 @@
 import React, { useState, useEffect } from 'react';
 import { queryNamespace, purgeNamespace, purgeBatchNamespaces, fetchNamespaces, checkLink, enqueueLink } from './api';
-import { Database, Trash2, Upload, FileText, CheckSquare, Square, CheckCircle, AlertCircle, MessageSquare, Bot, Search, Lock } from 'lucide-react';
+import { Database, Trash2, Upload, FileText, CheckSquare, Square, CheckCircle, AlertCircle, MessageSquare, Bot, Search, Lock, Cloud } from 'lucide-react';
+import FilePickerModal from './components/FilePickerModal';
 
 function App() {
   
+  const [providerTokens, setProviderTokens] = useState(() => {
+    try {
+      const saved = localStorage.getItem('providerTokens');
+      return saved ? JSON.parse(saved) : {};
+    } catch { return {}; }
+  });
+
+  useEffect(() => {
+    localStorage.setItem('providerTokens', JSON.stringify(providerTokens));
+  }, [providerTokens]);
+
+  const [activePicker, setActivePicker] = useState(null);
+
+  useEffect(() => {
+    const hash = window.location.hash.substring(1);
+    if (hash) {
+      const params = new URLSearchParams(hash);
+      const provider = params.get('provider');
+      const token = params.get('access_token');
+      if (provider && token) {
+        setProviderTokens(prev => ({ ...prev, [provider]: token }));
+        window.history.replaceState(null, null, ' '); 
+        showMessage(`Successfully connected to ${provider}!`);
+      }
+    }
+  }, []);
+
+  const handleOAuthLogin = (provider) => {
+    window.location.href = `http://localhost:8000/auth/login/${provider}`;
+  };
+
+  const handleDisconnect = (provider) => {
+    setProviderTokens(prev => {
+      const next = { ...prev };
+      delete next[provider];
+      return next;
+    });
+    setActivePicker(null);
+    showMessage(`Disconnected from ${provider}`);
+  };
+
+  const handleIngestItems = async (items) => {
+    setLoading(true);
+    try {
+      const res = await fetch('http://localhost:8000/enqueue_items', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: activePicker,
+          items: items,
+          access_token: providerTokens[activePicker]
+        })
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+         showMessage(data.message);
+      } else {
+         showMessage(data.message, 'error');
+      }
+    } catch (e) {
+      showMessage(`Error queuing items: ${e.message}`, 'error');
+    }
+    setLoading(false);
+  };
+  
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState(null);
+
   // State variables for the Link Ingestion UI form
   const [linksText, setLinksText] = useState(() => {
     return localStorage.getItem('savedDriveLinks') || '';
@@ -12,6 +81,7 @@ function App() {
   useEffect(() => {
     localStorage.setItem('savedDriveLinks', linksText);
   }, [linksText]);
+
   const [linkHistory, setLinkHistory] = useState(() => {
     try {
       const saved = localStorage.getItem('linkHistory');
@@ -22,9 +92,8 @@ function App() {
   useEffect(() => {
     localStorage.setItem('linkHistory', JSON.stringify(linkHistory));
   }, [linkHistory]);
+
   const [access_token, setAccessToken] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState(null);
   const [linkStatuses, setLinkStatuses] = useState({});
   
   // State variables for the Omni-Search RAG Chatbot UI
@@ -49,15 +118,41 @@ function App() {
     loadNamespaces();
   }, []);
 
+  const [progress, setProgress] = useState(null);
+
+  useEffect(() => {
+    const eventSource = new EventSource('http://localhost:8000/stream_progress');
+    
+    eventSource.onmessage = (event) => {
+      const text = event.data;
+      if (text.includes("Finished job")) {
+         setProgress({ text: text, percent: 100, done: true });
+         setTimeout(() => setProgress(null), 8000); 
+         loadNamespaces();
+      } else if (text.includes("Starting ingestion job")) {
+         setProgress({ text: text, percent: 0, done: false });
+      } else {
+         const match = text.match(/\[Progress\] (\d+)\/(\d+)/);
+         if (match) {
+            const current = parseInt(match[1]);
+            const total = parseInt(match[2]);
+            const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+            setProgress({ text: text, percent: percent, done: false });
+         } else {
+            setProgress(prev => ({ text: text, percent: prev?.percent || 0, done: false }));
+         }
+      }
+    };
+    
+    return () => eventSource.close();
+  }, []);
+
   // Utility to show temporary toast messages in the UI
   const showMessage = (text, type = 'success') => {
     setMessage({ text, type });
     setTimeout(() => setMessage(null), 5000);
   };
 
-  /**
-   * Pre-flights links to check if they are public or private, displaying colored feedback.
-   */
   const handleCheckLinks = async (e) => {
     e.preventDefault();
     const links = linksText.split('\n').map(l => l.trim()).filter(l => l);
@@ -174,9 +269,45 @@ function App() {
   };
 
   return (
-    <div className="app-container" style={{ gridTemplateColumns: '1fr' }}>
+    <div className="app-container">
+      {/* Realtime Progress Bar */}
+      {progress && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          zIndex: 9999,
+          background: 'rgba(15, 23, 42, 0.95)',
+          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          padding: '12px 24px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px',
+          backdropFilter: 'blur(10px)',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.5)'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', alignItems: 'center' }}>
+            <span style={{ color: progress.done ? '#4ade80' : '#60a5fa', fontWeight: '600' }}>
+              {progress.done ? 'Ingestion Complete! 🎉' : 'Ingestion in Progress... ⚡'}
+            </span>
+            <span style={{ color: '#94a3b8', fontSize: '0.8rem', maxWidth: '60%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {progress.text.replace('[Progress] ', '')}
+            </span>
+          </div>
+          <div style={{ width: '100%', height: '6px', background: 'rgba(255,255,255,0.1)', borderRadius: '3px', overflow: 'hidden' }}>
+            <div style={{ 
+              height: '100%', 
+              width: `${progress.percent}%`, 
+              background: progress.done ? '#4ade80' : 'linear-gradient(90deg, #3b82f6, #8b5cf6)',
+              transition: 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
+              borderRadius: '3px'
+            }} />
+          </div>
+        </div>
+      )}
 
-      <div className="main-content">
+      <div className="main-content" style={{ gridTemplateColumns: '1fr' }}>
         <div className="header">
           <h1>Vector Engine</h1>
           <p>Drop your Google Drive, Dropbox, or SharePoint links here, load them, and vectorize.</p>
@@ -190,6 +321,37 @@ function App() {
         )}
 
         <div className="glass-panel">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', padding: '1rem' }}>
+            <h3 style={{ fontSize: '1.1rem', color: '#e2e8f0', marginBottom: '0.5rem' }}>Connect Cloud Storage</h3>
+            
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              {['google', 'dropbox', 'sharepoint'].map(provider => (
+                <button 
+                  key={provider}
+                  onClick={() => providerTokens[provider] ? setActivePicker(provider) : handleOAuthLogin(provider)}
+                  className="btn"
+                  style={{ 
+                    flex: '1', 
+                    background: providerTokens[provider] ? 'rgba(74, 222, 128, 0.2)' : 'rgba(59, 130, 246, 0.2)',
+                    borderColor: providerTokens[provider] ? 'rgba(74, 222, 128, 0.5)' : 'rgba(59, 130, 246, 0.5)',
+                    display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem'
+                  }}
+                >
+                  <Cloud size={18} />
+                  {providerTokens[provider] ? `Browse ${provider.charAt(0).toUpperCase() + provider.slice(1)}` : `Connect ${provider.charAt(0).toUpperCase() + provider.slice(1)}`}
+                </button>
+              ))}
+            </div>
+            
+            {Object.keys(providerTokens).length > 0 && (
+              <p style={{ fontSize: '0.8rem', color: '#94a3b8', textAlign: 'center' }}>
+                Your access tokens are securely stored in memory for this session.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="glass-panel" style={{ marginTop: '2rem' }}>
           <form onSubmit={handleCheckLinks}>
             <div className="input-group">
               <label>Paste Links (Drive, Dropbox, SharePoint) (One per line)</label>
@@ -257,6 +419,15 @@ function App() {
             )}
           </form>
         </div>
+
+        <FilePickerModal 
+          isOpen={!!activePicker} 
+          onClose={() => setActivePicker(null)} 
+          provider={activePicker} 
+          accessToken={activePicker ? providerTokens[activePicker] : null} 
+          onIngest={handleIngestItems}
+          onDisconnect={() => handleDisconnect(activePicker)}
+        />
 
         <div className="glass-panel bot-panel">
           <h2>Chat with Vector Data</h2>

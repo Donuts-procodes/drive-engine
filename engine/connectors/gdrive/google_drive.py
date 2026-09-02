@@ -1,5 +1,7 @@
+
 import os
 import uuid
+import logging
 import requests
 import concurrent.futures
 import io
@@ -14,6 +16,8 @@ from typing import Optional, Iterator, Dict, Any
 
 from ..base import BaseConnector, SourceType, LinkPreflightResult
 from ..tika_parser import parse_with_tika
+
+logger = logging.getLogger(__name__)
 
 def extract_google_drive_file_id(link: str) -> tuple[str, str]:
     match = re.search(r'/folders/([a-zA-Z0-9_-]+)', link)
@@ -105,24 +109,69 @@ class GoogleDriveConnector(BaseConnector):
             http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http())
             service = build('drive', 'v3', http=http)
             
-            file_metadata = service.files().get(fileId=file_id, fields='mimeType,name').execute()
+            file_metadata = service.files().get(fileId=file_id, fields='mimeType,name,shortcutDetails').execute()
             mime_type = file_metadata.get('mimeType', '')
             file_name = file_metadata.get('name', 'Unknown')
             
-            if 'application/vnd.google-apps' in mime_type:
-                if mime_type == 'application/vnd.google-apps.document':
-                    request = service.files().export_media(fileId=file_id, mimeType='text/plain')
-                    mime_type = 'text/plain'
-                else:
+            if mime_type == 'application/vnd.google-apps.shortcut':
+                logger.info("Resolving shortcut %s to target ID: %s", file_id, file_metadata.get('shortcutDetails', {}).get('targetId'))
+                file_id = file_metadata['shortcutDetails']['targetId']
+                file_metadata = service.files().get(fileId=file_id, fields='mimeType,name').execute()
+                mime_type = file_metadata.get('mimeType', '')
+                file_name = file_metadata.get('name', 'Unknown')
+            
+            logger.info("File '%s' (ID: %s) has mimeType: %s", file_name, file_id, mime_type)
+            
+            # Map of Google Apps types to their best export format
+            GOOGLE_EXPORT_MAP = {
+                'application/vnd.google-apps.document': 'text/plain',
+                'application/vnd.google-apps.presentation': 'application/pdf',
+                'application/vnd.google-apps.drawing': 'application/pdf',
+            }
+            
+            # The user explicitly ONLY wants txt, docs, pdf, md, docx
+            ALLOWED_MIME_TYPES = {
+                'text/plain',                                                                # txt, md
+                'text/markdown',                                                             # md
+                'application/pdf',                                                           # pdf
+                'application/vnd.google-apps.document',                                      # docs
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',   # docx
+                'application/msword'                                                         # doc
+            }
+            
+            if mime_type not in ALLOWED_MIME_TYPES:
+                logger.info("Skipping unapproved type: %s for '%s'", mime_type, file_name)
+                return {"skipped": True, "id": file_id, "name": file_name, "reason": f"Only txt, docs, pdf, md, docx are allowed. Got: {mime_type}"}
+            
+            if mime_type in GOOGLE_EXPORT_MAP:
+                export_mime = GOOGLE_EXPORT_MAP[mime_type]
+                logger.info("Exporting Google Apps file as %s", export_mime)
+                request = service.files().export_media(fileId=file_id, mimeType=export_mime)
+                mime_type = export_mime
+            elif 'application/vnd.google-apps' in mime_type:
+                # Unknown google-apps type, try PDF export first, then fall back
+                print(f"[GDrive] Unknown Google Apps type '{mime_type}', trying PDF export...")
+                try:
                     request = service.files().export_media(fileId=file_id, mimeType='application/pdf')
                     mime_type = 'application/pdf'
+                    downloader = MediaIoBaseDownload(buffer, request)
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+                except Exception as e:
+                    print(f"[GDrive] PDF export failed for unknown type '{mime_type}': {e}")
+                    return {"skipped": True, "id": file_id, "name": file_name, "reason": f"Cannot export type: {mime_type}"}
             else:
+                # Standard binary file (PDF, DOCX, PPTX, TXT, etc.) — direct download
+                logger.info("Downloading binary file directly")
                 request = service.files().get_media(fileId=file_id)
                 
-            downloader = MediaIoBaseDownload(buffer, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
+            # Download the file (for mapped exports and binary files)
+            if buffer.tell() == 0:  # Only download if we haven't already (unknown type branch handles its own)
+                downloader = MediaIoBaseDownload(buffer, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
         else:
             download_url = f'https://drive.google.com/uc?export=download&id={file_id}'
             response = requests.get(download_url, stream=True)
@@ -181,21 +230,21 @@ class GoogleDriveConnector(BaseConnector):
                     log_file.write(f"ID: {item['id']} | Name: {item['name']}\n")
                 log_file.write("\n")
         except Exception as e:
-            print(f"Failed to write log: {e}")
+            logger.warning("Failed to write log: %s", e)
             
-        print(f"[GDrive] Total files to process: {len(files_to_process)}")
+        logger.info("Total files to process: %d", len(files_to_process))
         yield {"status": "metadata", "total_files": len(files_to_process)}
         
         def process_item(item):
-            print(f"[GDrive] Processing item: {item['name']} (ID: {item['id']})")
+            logger.info("Processing item: %s (ID: %s)", item['name'], item['id'])
             if skip_callback and skip_callback(item['id']):
-                print(f"[GDrive] Skipping duplicate: {item['name']}")
+                logger.info("Skipping duplicate: %s", item['name'])
                 return {"id": item['id'], "skipped": True, "name": item['name']}
                 
             link = f"https://drive.google.com/file/d/{item['id']}/view"
-            print(f"[GDrive] Downloading & parsing file: {item['name']}")
+            logger.info("Downloading & parsing file: %s", item['name'])
             result_dict = self.stream_file(link, access_token)
-            print(f"[GDrive] Finished parsing file: {item['name']}")
+            logger.info("Finished parsing file: %s", item['name'])
             return {
                 "id": item['id'],
                 "link": link,
@@ -218,7 +267,7 @@ class GoogleDriveConnector(BaseConnector):
                     files_found = True
                     yield result
                 except Exception as e:
-                    print(f"Skipping file {item['name']} inside folder due to error: {e}")
+                    logger.error("Skipping file %s inside folder due to error: %s", item['name'], e)
                     files_found = True # Prevent 'no files found' crash if all fail
                     yield {"status": "error", "id": item['id'], "name": item['name'], "error": str(e)}
                 

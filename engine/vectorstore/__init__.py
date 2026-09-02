@@ -1,9 +1,12 @@
 import os
+import logging
 import pkgutil
 import importlib
 import threading
 from pathlib import Path
 from .base import BaseVectorStore
+
+logger = logging.getLogger(__name__)
 
 # Dynamically discover and import all vector stores in this package
 # This triggers __init_subclass__ in BaseVectorStore which registers them.
@@ -12,7 +15,7 @@ for (_, module_name, is_pkg) in pkgutil.iter_modules([str(package_dir)]):
     try:
         importlib.import_module(f".{module_name}", __name__)
     except Exception as e:
-        print(f"Warning: Failed to load VectorStore plugin '{module_name}': {e}")
+        logger.warning("Failed to load VectorStore plugin '%s': %s", module_name, e)
 
 _global_store_instance = None
 _store_lock = threading.Lock()

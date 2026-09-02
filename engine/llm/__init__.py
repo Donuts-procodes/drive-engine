@@ -1,8 +1,11 @@
 import os
+import logging
 import pkgutil
 import importlib
 from pathlib import Path
 from .base import BaseRAGEngine
+
+logger = logging.getLogger(__name__)
 
 # Dynamically discover and import all llms in this package
 # This triggers __init_subclass__ in BaseRAGEngine which registers them.
@@ -11,7 +14,7 @@ for (_, module_name, is_pkg) in pkgutil.iter_modules([str(package_dir)]):
     try:
         importlib.import_module(f".{module_name}", __name__)
     except Exception as e:
-        print(f"Warning: Failed to load LLM plugin '{module_name}': {e}")
+        logger.warning("Failed to load LLM plugin '%s': %s", module_name, e)
 
 def get_rag_engine() -> BaseRAGEngine:
     """
